@@ -21,9 +21,6 @@ def lambda_handler(event, context):
     # db_name = "morp"
     # num_instances = "1"
     status, pr_url = create_new_doc_db({"db_name": db_name, "num_instances": num_instances}, run_id, service_identifier)
-    # Need to create DB Blueprint
-    # Need to create a DB entity and create a relation to the microservice
-    # Need to send a slack message when the PR is open to ask for approval (bonus)
     if status == 'FAILURE':
         return {
             "body": {
