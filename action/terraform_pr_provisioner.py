@@ -1,8 +1,10 @@
 import json
 from typing import Literal, Union
+from clients.port import add_action_log_message
 from resource_definitions import VARIABLE_RESOURCES
 from consts import GH_ORGANIZATION, GH_REPOSITORY
-from clients.github import create_branch, create_pr, get_file_contents, update_file
+from clients.github import create_branch, create_pr, get_file_contents, update_file, generate_new_resource_pr_description, generate_update_resource_pr_description
+from log_utils import log_and_add_action_log_line
 
 import logging
 
@@ -42,7 +44,7 @@ def create_port_docdb_entity_resource(db_name):
 resource "port-labs_entity" "port-terraform-provisioner-docdb-{db_name}" {{
   title      = "{db_name}"
   blueprint  = "database"
-  identifier = aws_docdb_cluster.port-terraform-provisioner-docdb-{db_name}.cluster_identifier
+  identifier = "{db_name}"
   properties {{
     name  = "type"
     value = "DocumentDB"
@@ -54,7 +56,7 @@ resource "port-labs_entity" "port-terraform-provisioner-docdb-{db_name}" {{
 def create_new_cluster_identifier_output_resource(run_id, db_name, service_identifier):
     return '''
 output "{run_id}" {{
-  value = aws_docdb_cluster.port-terraform-provisioner-docdb-{db_name}.cluster_identifier
+  value = "{db_name}"
 }}
 
 output "{run_id}-service_identifier" {{
@@ -64,15 +66,12 @@ output "{run_id}-service_identifier" {{
 
 
 def add_resources_to_existing_vars_defaults_file(existing_vars_defaults_json: dict, params):
-    print('add_resources_to_existing_vars_defaults_file')
-    print(VARIABLE_RESOURCES.items())
-    print(params.items())
-    for res, v in VARIABLE_RESOURCES.items():
-        res_name = f'{res}-{params["db_name"]}'
-        for var in v:
+    for resource, value in VARIABLE_RESOURCES.items():
+        tf_resource_name = f'{resource}-{params["db_name"]}'
+        for resource_variable in value:
             dict_update = {
-                f'{res_name}_{var}': {
-                    "default": params[var]
+                f'{tf_resource_name}_{resource_variable}': {
+                    "default": params[resource_variable]
                 }
             }
             existing_vars_defaults_json['variable'].update(dict_update)
@@ -80,70 +79,109 @@ def add_resources_to_existing_vars_defaults_file(existing_vars_defaults_json: di
 
 
 def add_resources_to_existing_vars_file(existing_vars_json, params):
-    print('add_resources_to_existing_vars_file')
-    print(VARIABLE_RESOURCES.items())
-    print(params.items())
-    for res, v in VARIABLE_RESOURCES.items():
-        res_name = f'{res}-{params["db_name"]}'
-        for var in v:
-            print("var:", var)
-            print("res_name:", res_name)
-            existing_vars_json[f'{res_name}_{var}'] = params[var]
+    logger.info('add_resources_to_existing_vars_file')
+    logger.info(VARIABLE_RESOURCES.items())
+    logger.info(params.items())
+    for resource, var_list in VARIABLE_RESOURCES.items():
+        resource_name = f'{resource}-{params["db_name"]}'
+        for var in var_list:
+            logger.debug("var:", var)
+            logger.debug("res_name:", resource_name)
+            existing_vars_json[f'{resource_name}_{var}'] = params[var]
     return existing_vars_json
 
 
 def update_resources_in_existing_vars_file(existing_vars_file_content_json, db_identifier, params):
-    for res in [f'port-terraform-provisioner-docdb-{db_identifier}', f'cluster_instances-{db_identifier}']:
-        print(res)
+    for resource_name in [f'port-terraform-provisioner-docdb-{db_identifier}', f'cluster_instances-{db_identifier}']:
+        print(resource_name)
         for k, v in params.items():
-            print(f'{res}_{k}')
-            if f'{res}_{k}' in existing_vars_file_content_json and v:
-                existing_vars_file_content_json[f'{res}_{k}'] = v
+            print(f'{resource_name}_{k}')
+            if f'{resource_name}_{k}' in existing_vars_file_content_json and v:
+                existing_vars_file_content_json[f'{resource_name}_{k}'] = v
     return existing_vars_file_content_json
 
 
+def update_vars_defaults_file_with_new_resource(run_id: str, params):
+    target_filename = "main/demo/terraform/variables.tf.json"
+    log_and_add_action_log_line(logger, run_id, message=f"🔧 Adding resource defaults for new TF resource to the {target_filename} file")
+    log_and_add_action_log_line(logger, run_id, message=f"specified defaults: {str(params.items())}")
+    vars_defaults_file = get_file_contents(name=target_filename, ref=run_id)
+    vars_defaults_file_content = vars_defaults_file.decoded_content.decode()
+    updated_vars_defaults_file_content = json.dumps(
+        add_resources_to_existing_vars_defaults_file(json.loads(vars_defaults_file_content), params), indent=4)
+    update_file(vars_defaults_file.path, "Added new resource variables defaults to the defaults file",
+                updated_vars_defaults_file_content, vars_defaults_file.sha, branch=run_id)
+    log_and_add_action_log_line(logger, run_id, message=f"✅ Added resource defaults to the {target_filename} file")
+
+
+def update_definitions_file_with_new_resource(run_id: str, service_identifier: str, params):
+    target_filename = "main/demo/terraform/main.tf"
+    log_and_add_action_log_line(logger, run_id, message=f"🔧 Adding resource definitions for new TF resource to the {target_filename} file")
+    log_and_add_action_log_line(logger, run_id, message=f"specified parameters: {str(params.items())}")
+    existing_tf_definition_file = get_file_contents(name=target_filename, ref=run_id)
+    existing_tf_definition_file_content = existing_tf_definition_file.decoded_content.decode()
+    updated_tf_definition_file_content = existing_tf_definition_file_content + create_doc_db_resource(params['db_name']) + create_doc_db_instances_resource(
+        params['db_name']) + create_port_docdb_entity_resource(params['db_name']) + create_new_cluster_identifier_output_resource(run_id,
+                                                                                                                                  params['db_name'],
+                                                                                                                                  service_identifier)
+    update_file(existing_tf_definition_file.path, "Added new resource definitions to TF file",
+                updated_tf_definition_file_content, existing_tf_definition_file.sha, branch=run_id)
+    log_and_add_action_log_line(logger, run_id, message=f"✅ Added resource definitions to the {target_filename} file")
+
+
+def update_vars_file_with_new_resource(run_id: str, params):
+    target_filename = "main/demo/terraform/vars.tfvars.json"
+    log_and_add_action_log_line(logger, run_id, message=f"🔧 Adding resource variables for new TF resource to the {target_filename} file")
+    log_and_add_action_log_line(logger, run_id, message=f"specified parameters: {str(params.items())}")
+    vars_file = get_file_contents(name=target_filename, ref=run_id)
+    vars_file_content = vars_file.decoded_content.decode()
+    updated_vars_file_content = json.dumps(add_resources_to_existing_vars_file(json.loads(vars_file_content), params), indent=4)
+    update_file(vars_file.path, "Added new resource variables to tfvars file",
+                updated_vars_file_content, vars_file.sha, branch=run_id)
+    log_and_add_action_log_line(logger, run_id, message=f"✅ Added resource variables to the {target_filename} file")
+
+
+def update_vars_file_with_new_values_for_existing_resource(run_id: str, db_identifier: str, params):
+    target_filename = "main/demo/terraform/vars.tfvars.json"
+    log_and_add_action_log_line(logger, run_id, message=f"🔧 Updating resource variables for existing TF resource in the {target_filename} file")
+    log_and_add_action_log_line(logger, run_id, message=f"specified parameters: {str(params.items())}")
+    existing_vars_file = get_file_contents(name=target_filename, ref=run_id)
+    existing_vars_file_content = existing_vars_file.decoded_content.decode()
+    existing_vars_file_content_json = json.loads(existing_vars_file_content)
+    updated_existing_vars_file_content = json.dumps(update_resources_in_existing_vars_file(
+        existing_vars_file_content_json, db_identifier, params), indent=4)
+    update_file(existing_vars_file.path, "Updated existing DB resource definition",
+                updated_existing_vars_file_content, existing_vars_file.sha, branch=run_id)
+    log_and_add_action_log_line(logger, run_id, message=f"✅ Added resource variables to the {target_filename} file")
+
+
 def create_new_doc_db(params: dict, run_id: str, service_identifier: str) -> Union[Literal['FAILURE'], Literal['SUCCESS']]:
+    """
+    Opens a new PR with the following file changes:
+    Adds the default values for the newly added TF resources (main/demo/terraform/variables.tf.json)
+    Adds the new resource definition for the new resource (main/demo/terraform/main.tf)
+    Adds the new variable values for the new resource (main/demo/terraform/vars.tfvars.json)
+    """
     try:
-        print(f'Run ID: {run_id}')
-        new_branch_name = run_id
-        create_branch(new_branch_name=new_branch_name)
-        existing_vars_defaults_file = get_file_contents(name=f"main/demo/terraform/variables.tf.json", ref=new_branch_name)
-        existing_vars_defaults_file_content = existing_vars_defaults_file.decoded_content.decode()
-        updated_existing_vars_defaults_file_content = json.dumps(
-            add_resources_to_existing_vars_defaults_file(json.loads(existing_vars_defaults_file_content), params), indent=4)
-        existing_vars_file = get_file_contents(name=f"main/demo/terraform/vars.tfvars.json", ref=new_branch_name)
-        existing_vars_file_content = existing_vars_file.decoded_content.decode()
-        updated_existing_vars_file_content = json.dumps(add_resources_to_existing_vars_file(json.loads(existing_vars_file_content), params), indent=4)
-        existing_tf_definition_file = get_file_contents(name=f"main/demo/terraform/main.tf", ref=new_branch_name)
-        existing_tf_definition_file_content = existing_tf_definition_file.decoded_content.decode()
-        updated_tf_definition_file_content = existing_tf_definition_file_content + create_doc_db_resource(params['db_name']) + create_doc_db_instances_resource(
-            params['db_name']) + create_port_docdb_entity_resource(params['db_name']) + create_new_cluster_identifier_output_resource(run_id,
-                                                                                                                                      params['db_name'],
-                                                                                                                                      service_identifier)
-        update_file(existing_tf_definition_file.path, "Added new DB resource to TF file",
-                    updated_tf_definition_file_content, existing_tf_definition_file.sha, branch=new_branch_name)
-        update_file(existing_vars_file.path, "Added new DB variables to tfvars file",
-                    updated_existing_vars_file_content, existing_vars_file.sha, branch=new_branch_name)
-        update_file(existing_vars_defaults_file.path, "Added new DB variables to variable defaults file",
-                    updated_existing_vars_defaults_file_content, existing_vars_defaults_file.sha, branch=new_branch_name)
+        create_branch(run_id=run_id)
+        update_vars_defaults_file_with_new_resource(run_id, params)
+        update_vars_file_with_new_resource(run_id, params)
+        update_definitions_file_with_new_resource(run_id, service_identifier, params)
 
-        print('File updated')
+        log_and_add_action_log_line(logger, run_id, message=f"✅ All files updated")
+        log_and_add_action_log_line(logger, run_id, message=f"🔧 Creating new PR")
         pr = create_pr(
-            title=f"Add new DocDB {params['db_name']}",
-            body=f'''Adding a new DocDB resource to the set of existing resources tracked in our Terraform.
-            
-DB name: `{params['db_name']}`
-
-Requested DB parameters:
-```
-{json.dumps(params, indent=4)}
-```
-''',
-            head_branch=new_branch_name)
-        print(f"init DocDB creation of DB {params['db_name']} - success, created PR number: {pr.number}")
-        return 'SUCCESS', f'https://github.com/{GH_ORGANIZATION}/{GH_REPOSITORY}/pull/{pr.number}'
+            title=f"Add new DocDB {params['db_name']} resource",
+            body=generate_new_resource_pr_description(params),
+            head_branch=run_id)
+        pr_url = f'https://github.com/{GH_ORGANIZATION}/{GH_REPOSITORY}/pull/{pr.number}'
+        log_and_add_action_log_line(logger, run_id, message=f"✅ PR created")
+        log_and_add_action_log_line(logger, run_id, message=f"Number: {pr.number}")
+        log_and_add_action_log_line(logger, run_id, message=f"🔗 PR URL: {pr_url}")
+        return 'SUCCESS', pr_url
     except Exception as err:
-        logger.error(f"init DocDB creation of DB {params['db_name']} - error: {err}")
+        logger.error(f"❌ Error adding new DocDB resource: {err}")
+        add_action_log_message(run_id, f"❌ Error adding new DoCDB resource: {err}")
 
     return 'FAILURE', None
 
@@ -151,32 +189,28 @@ Requested DB parameters:
 def update_existing_doc_db(params: dict, run_id: str, db_identifier: str) -> Union[Literal['FAILURE'], Literal['SUCCESS']]:
     try:
         print(f'Run ID: {run_id}')
-        new_branch_name = run_id
-        create_branch(new_branch_name=new_branch_name)
-        existing_vars_file = get_file_contents(name=f"main/demo/terraform/vars.tfvars.json", ref=new_branch_name)
-        existing_vars_file_content = existing_vars_file.decoded_content.decode()
-        existing_vars_file_content_json = json.loads(existing_vars_file_content)
-        updated_existing_vars_file_content = json.dumps(update_resources_in_existing_vars_file(
-            existing_vars_file_content_json, db_identifier, params), indent=4)
-        update_file(existing_vars_file.path, "Updated existing DB resource definition",
-                    updated_existing_vars_file_content, existing_vars_file.sha, branch=new_branch_name)
-        print('File updated')
+        create_branch(run_id=run_id)
+        update_vars_file_with_new_values_for_existing_resource(run_id, db_identifier, params)
+        # log_and_add_action_log_line(run_id, f"🔧 Updating existing resource definition values in ")
+        # existing_vars_file = get_file_contents(name=f"main/demo/terraform/vars.tfvars.json", ref=run_id)
+        # existing_vars_file_content = existing_vars_file.decoded_content.decode()
+        # existing_vars_file_content_json = json.loads(existing_vars_file_content)
+        # updated_existing_vars_file_content = json.dumps(update_resources_in_existing_vars_file(
+        #     existing_vars_file_content_json, db_identifier, params), indent=4)
+        # update_file(existing_vars_file.path, "Updated existing DB resource definition",
+        #             updated_existing_vars_file_content, existing_vars_file.sha, branch=run_id)
+        log_and_add_action_log_line(logger, run_id, message=f"✅ All files updated")
         pr = create_pr(
             title=f"Update existing DocDB {db_identifier}",
-            body=f'''Updating the definition of existing DocDB {db_identifier} in our Terraform
-            
-DB name: `{db_identifier}`
-
-Updated variables (`null` means the value will not be updated):
-```
-{json.dumps(params, indent=4)}
-```
-
-''',
-            head_branch=new_branch_name)
-        print(f"init DocDB update of DB {db_identifier} - success, created PR number: {pr.number}")
-        return 'SUCCESS', f'https://github.com/{GH_ORGANIZATION}/{GH_REPOSITORY}/pull/{pr.number}'
+            body=generate_update_resource_pr_description(db_identifier, params),
+            head_branch=run_id)
+        pr_url = f'https://github.com/{GH_ORGANIZATION}/{GH_REPOSITORY}/pull/{pr.number}'
+        log_and_add_action_log_line(logger, run_id, message=f"✅ PR created")
+        log_and_add_action_log_line(logger, run_id, message=f"Number: {pr.number}")
+        log_and_add_action_log_line(logger, run_id, message=f"🔗 PR URL: {pr_url}")
+        return 'SUCCESS', pr_url
     except Exception as err:
-        logger.error(f"init DocDB update of DB {db_identifier} - error: {err}")
+        logger.error(f"❌ Error editing DocDB resource: {err}")
+        add_action_log_message(run_id, f"❌ Error editing new DoCDB resource: {err}")
 
     return 'FAILURE', None
