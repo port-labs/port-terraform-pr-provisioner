@@ -191,14 +191,6 @@ def update_existing_doc_db(params: dict, run_id: str, db_identifier: str) -> Uni
         print(f'Run ID: {run_id}')
         create_branch(run_id=run_id)
         update_vars_file_with_new_values_for_existing_resource(run_id, db_identifier, params)
-        # log_and_add_action_log_line(run_id, f"🔧 Updating existing resource definition values in ")
-        # existing_vars_file = get_file_contents(name=f"main/demo/terraform/vars.tfvars.json", ref=run_id)
-        # existing_vars_file_content = existing_vars_file.decoded_content.decode()
-        # existing_vars_file_content_json = json.loads(existing_vars_file_content)
-        # updated_existing_vars_file_content = json.dumps(update_resources_in_existing_vars_file(
-        #     existing_vars_file_content_json, db_identifier, params), indent=4)
-        # update_file(existing_vars_file.path, "Updated existing DB resource definition",
-        #             updated_existing_vars_file_content, existing_vars_file.sha, branch=run_id)
         log_and_add_action_log_line(logger, run_id, message=f"✅ All files updated")
         pr = create_pr(
             title=f"Update existing DocDB {db_identifier}",
