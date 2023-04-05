@@ -3,8 +3,11 @@ import json
 from consts import SLACK_WEBHOOK_URL
 
 
-def send_approval_message(pr_url):
-    messageText = "A new DocDB provision request is awaiting your approval"
+def send_approval_message(pr_url, action_identifier):
+    if action_identifier == 'add_document_db':
+        messageText = "A new DocDB *provision* request is awaiting your approval"
+    elif action_identifier == 'update_document_db':
+        messageText = "A new DocDB definition *update* request is awaiting your approval"
     message = {
         "text": messageText,
         "username": 'Port Reporter',
